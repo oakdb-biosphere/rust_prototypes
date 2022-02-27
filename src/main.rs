@@ -8,13 +8,17 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream};
 use tokio_tungstenite::tungstenite::Message;
 
+
+/// A unique value that will be assigned to each
+/// database client
 type ClientID = u64;
 
+/// A primitive database structure whose operations
+/// will be exposed via WebSocket server
 #[derive(Default)]
 pub struct Database {
     next_client_id: ClientID,
 }
-
 impl Database {
     pub fn next_client_id(&mut self) -> ClientID {
         self.next_client_id += 1;
@@ -22,9 +26,13 @@ impl Database {
     }
 }
 
+/// A table mapping database clients to websocket connections
 type WSClientTable = HashMap<ClientID, WebSocketStream<TcpStream>>;
+
+/// Aliases for types concerned with shared-mutability
 type SharedWSClientTable = Arc<Mutex<WSClientTable>>;
 type SharedDatabase = Arc<Mutex<Database>>;
+
 
 fn main() {
     let db = Database::default();
@@ -32,6 +40,9 @@ fn main() {
     rt.block_on(expose_via_tcp(db)).unwrap();
 }
 
+
+/// Continuously accept TCP connections, and try to interpret
+/// incoming messages as database operations
 async fn expose_via_tcp(db: Database) -> Result<(), Error> {
     let addr = env::args().nth(1).unwrap_or("127.0.0.1:8080".to_string());
     let tcp_socket = TcpListener::bind(&addr).await;
@@ -59,6 +70,8 @@ async fn expose_via_tcp(db: Database) -> Result<(), Error> {
     }
 }
 
+/// Performs the WebSocket protocol handshake, and handles
+/// the sending and receiving of messages
 async fn handle_connection(
     tcp_stream: TcpStream,
     shared_clients: SharedWSClientTable,
