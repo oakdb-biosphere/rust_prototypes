@@ -1,7 +1,9 @@
 
 use std::{env, io::Error};
 use std::collections::HashMap;
-use futures_util::{future, StreamExt, SinkExt, TryStreamExt};
+use std::sync::{Arc};
+use futures::lock::Mutex;
+use futures_util::{SinkExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -9,65 +11,74 @@ use tokio_tungstenite::tungstenite::Message;
 type ClientID = u64;
 
 #[derive(Default)]
-pub struct DB {
+pub struct Database {
     next_client_id: ClientID,
 }
 
-impl DB {
+impl Database {
     pub fn next_client_id(&mut self) -> ClientID {
         self.next_client_id += 1;
         self.next_client_id
     }
 }
 
-type WSConnections = HashMap<ClientID, WebSocketStream<TcpStream>>;
+type WSClientTable = HashMap<ClientID, WebSocketStream<TcpStream>>;
+type SharedWSClientTable = Arc<Mutex<WSClientTable>>;
+type SharedDatabase = Arc<Mutex<Database>>;
 
 fn main() {
-    let db = DB::default();
+    let db = Database::default();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(expose_via_tcp(db)).unwrap();
 }
 
-async fn expose_via_tcp(mut db: DB) -> Result<(), Error> {
+async fn expose_via_tcp(db: Database) -> Result<(), Error> {
     let addr = env::args().nth(1).unwrap_or("127.0.0.1:8080".to_string());
     let tcp_socket = TcpListener::bind(&addr).await;
     let tcp_listener = tcp_socket.expect("Failed to bind");
     println!("Accepting TCP on: {}", addr);
 
-    let mut clients: WSConnections = HashMap::new();
+    // Making shareable global objects
+    let clients: WSClientTable = HashMap::new();
+    let clients = Arc::new(Mutex::new(clients));
+    let db = Arc::new(Mutex::new(db));
 
     loop {
         match tcp_listener.accept().await {
             Err(e) => println!("Failed to accept connection: {}", e),
-            Ok((tcp_stream, _addr)) => {
+            Ok((tcp_stream, addr)) => {
 
-                let ws_stream = tokio_tungstenite::accept_async(tcp_stream).await
-                    .expect("Error during the websocket handshake occurred");
+                // Creating new references to shared objects
+                let shared_clients = Arc::clone(&clients);
+                let shared_db = Arc::clone(&db);
 
-                // Storing client in table
-                let client_id = db.next_client_id();
-                clients.insert(client_id, ws_stream);
-
-                let ws_stream = clients.get_mut(&client_id).unwrap();
-                let message = format!("Your cid is {}", client_id);
-
-                ws_stream.send(Message::Text(message)).await
-                    .expect("Could not send message");
-
-                // tokio::spawn(accept_connection(tcp_stream));
+                println!("Receiving new connection: {:?}", addr);
+                tokio::spawn(handle_connection(tcp_stream, shared_clients, shared_db));
             },
         }
     }
 }
 
-async fn accept_connection(stream: TcpStream) {
-    let ws_stream = tokio_tungstenite::accept_async(stream).await
+async fn handle_connection(
+    tcp_stream: TcpStream,
+    shared_clients: SharedWSClientTable,
+    shared_db: SharedDatabase
+) {
+    let ws_stream = tokio_tungstenite::accept_async(tcp_stream).await
         .expect("Error during the websocket handshake occurred");
 
-    let (write, read) = ws_stream.split();
+    // Getting mutable references to shared objects
+    let mut clients = shared_clients.lock().await;
+    let mut db = shared_db.lock().await;
 
-    read.try_filter(|msg| future::ready(msg.is_text() || msg.is_binary()))
-        .forward(write)
-        .await
-        .expect("Failed to forward messages")
+    // Adding the new client to the collection
+    let client_id = db.next_client_id();
+    clients.insert(client_id, ws_stream);
+
+    // Preparing a message to send to the client
+    let ws_stream = clients.get_mut(&client_id).unwrap();
+    let message = format!("Your cid is {}", client_id);
+
+    ws_stream.send(Message::Text(message)).await
+        .expect("Failed to send message")
 }
